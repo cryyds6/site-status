@@ -204,7 +204,7 @@ header {
           display: flex;
           flex-direction: column;
           .title {
-            font-size: 32px;
+            font-size: 26px;
             font-weight: bold;
           }
           .tip {
