@@ -204,11 +204,8 @@ header {
           display: flex;
           flex-direction: column;
           .title {
-            font-size: 28px;
+            font-size: 32px;
             font-weight: bold;
-            @media (max-width: 512px) {
-              font-size: 20px;
-            }
           }
           .tip {
             font-size: 14px;
