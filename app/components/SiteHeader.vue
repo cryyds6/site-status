@@ -121,7 +121,7 @@ const refresh = async () => {
     return;
   }
   updateTime.value = 300;
-  await getSiteData();
+  await getSiteData(true);
 };
 
 // 执行倒计时
@@ -130,8 +130,7 @@ const { pause: pauseTime, resume: resumeTime } = useIntervalFn(
     if (updateTime.value > 0) updateTime.value--;
     if (updateTime.value === 0) {
       pauseTime();
-      statusStore.siteStatus = "loading";
-      await getSiteData();
+      await getSiteData(true);
       updateTime.value = 300;
       resumeTime();
     }

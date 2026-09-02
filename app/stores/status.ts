@@ -20,7 +20,8 @@ export const useStatusStore = defineStore(
   {
     persist: {
       storage: piniaPluginPersistedstate.localStorage(),
-      pick: ["siteLang"],
+      // 持久化站点数据：再次打开时先秒显上次数据，再静默拉取最新
+      pick: ["siteLang", "siteData"],
     },
   },
 );

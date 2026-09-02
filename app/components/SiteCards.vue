@@ -185,16 +185,16 @@ const getDayStatus = (percent: number): SiteType => {
   else return "unknown";
 };
 
-// 重试
+// 重试：保留旧数据展示，避免清空导致卡片闪烁
 const refresh = async () => {
-  statusStore.$patch({
-    siteStatus: "loading",
-    siteData: undefined,
-  });
+  statusStore.siteStatus = "loading";
   await getSiteData();
 };
 
-onMounted(getSiteData);
+// 已有本地缓存数据时静默刷新（秒显旧数据），否则常规加载
+onMounted(() =>
+  getSiteData(statusStore.siteData ? true : false),
+);
 </script>
 
 <style lang="scss" scoped>

@@ -52,7 +52,7 @@ export interface MonitorsDataResult {
 export interface MonitorsResult {
   code: number;
   message: string;
-  source: "cache" | "api";
+  source: "cache" | "api" | "stale";
   data: MonitorsDataResult | undefined;
 }
 

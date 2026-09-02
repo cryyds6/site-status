@@ -1,8 +1,24 @@
 // https://uptimerobot.com/api/#methods
 import dayjs from "dayjs";
-import type { MonitorsDataResult, MonitorsResult } from "~~/types/main";
-import { getCache, setCache } from "~/utils/cache-server";
+import {
+  dedupe,
+  getFresh,
+  getStale,
+  kvGet,
+  kvSet,
+  setCache,
+} from "../utils/cache-server";
 import { formatSiteData } from "~/utils/format";
+import type { MonitorsDataResult, MonitorsResult } from "~~/types/main";
+
+// 缓存键
+const CACHE_KEY = "site-data";
+// 新鲜期：1 分钟内直接返回缓存
+const FRESH_TTL = 1000 * 60;
+// 兜底保留期：24 小时内的旧数据可在上游故障时返回
+const STALE_TTL = 1000 * 60 * 60 * 24;
+// 上游请求超时
+const UPSTREAM_TIMEOUT = 10000;
 
 const getRanges = ():
   | {
@@ -37,32 +53,11 @@ const getRanges = ():
  * 获取站点数据
  */
 export default defineEventHandler(async (event): Promise<MonitorsResult> => {
-  try {
+  // 从上游拉取最新数据（写入两级缓存）
+  const fetchUpstream = async (): Promise<MonitorsDataResult> => {
     const config = useRuntimeConfig();
-    const { apiUrl, apiKey, sitePassword, siteSecretKey } = config;
-    if (!apiUrl || !apiKey) {
-      throw new Error("Missing API url or API key");
-    }
-    // 若登录-验证 token
-    if (sitePassword && siteSecretKey) {
-      const token = getCookie(event, "authToken");
-      if (!token) throw new Error("Please log in first");
-      // 验证 Token
-      const isLogin = await verifyJwt(token);
-      if (!isLogin) throw new Error("Invalid or expired token");
-    }
-    // 缓存键
-    const cacheKey = "site-data";
-    // 检查缓存
-    const cachedData = getCache(cacheKey);
-    if (cachedData) {
-      return {
-        code: 200,
-        message: "success",
-        source: "cache",
-        data: cachedData as MonitorsDataResult,
-      };
-    }
+    const { apiUrl, apiKey } = config;
+    if (!apiUrl || !apiKey) throw new Error("Missing API url or API key");
     const rangesData = getRanges();
     if (!rangesData) throw new Error("Missing");
     const { dates, ranges, start, end } = rangesData;
@@ -81,22 +76,80 @@ export default defineEventHandler(async (event): Promise<MonitorsResult> => {
       logs_end_date: end,
       custom_uptime_ranges: ranges,
     };
-    // 尝试获取
     const result = await $fetch(apiUrl + "getMonitors", {
       method: "POST",
       body,
+      timeout: UPSTREAM_TIMEOUT,
     });
-    // 处理数据
     const data = formatSiteData(result, dates);
-    // 缓存数据
-    setCache(cacheKey, data, 1000 * 60);
-    return {
-      code: 200,
-      message: "success",
-      source: "api",
-      data,
-    };
+    setCache(CACHE_KEY, data, FRESH_TTL, STALE_TTL);
+    void kvSet(CACHE_KEY, data);
+    return data;
+  };
+
+  try {
+    const config = useRuntimeConfig();
+    const { sitePassword, siteSecretKey } = config;
+    // 若登录-验证 token
+    if (sitePassword && siteSecretKey) {
+      const token = getCookie(event, "authToken");
+      if (!token) throw new Error("Please log in first");
+      // 验证 Token
+      const isLogin = await verifyJwt(token);
+      if (!isLogin) throw new Error("Invalid or expired token");
+    }
+
+    // 1. 新鲜缓存：直接返回
+    const fresh = getFresh<MonitorsDataResult>(CACHE_KEY);
+    if (fresh) {
+      return { code: 200, message: "success", source: "cache", data: fresh };
+    }
+
+    // 2. KV 缓存：Cloudflare isolate 内存缓存会随请求销毁，KV 是可靠的跨请求层
+    const kvEntry = await kvGet<MonitorsDataResult>(CACHE_KEY);
+    if (kvEntry) {
+      const age = Date.now() - kvEntry.storedAt;
+      setCache(CACHE_KEY, kvEntry.value, FRESH_TTL, STALE_TTL);
+      if (age <= FRESH_TTL) {
+        return {
+          code: 200,
+          message: "success",
+          source: "cache",
+          data: kvEntry.value,
+        };
+      }
+      // 陈旧：立即返回旧数据，后台静默刷新（SWR）
+      void dedupe(CACHE_KEY, fetchUpstream).catch((error) =>
+        console.error("background refresh failed:", error),
+      );
+      return {
+        code: 200,
+        message: "success",
+        source: "stale",
+        data: kvEntry.value,
+      };
+    }
+
+    // 3. 内存陈旧缓存：立即返回 + 后台刷新
+    const stale = getStale<MonitorsDataResult>(CACHE_KEY);
+    if (stale) {
+      void dedupe(CACHE_KEY, fetchUpstream).catch((error) =>
+        console.error("background refresh failed:", error),
+      );
+      return { code: 200, message: "success", source: "stale", data: stale };
+    }
+
+    // 4. 无任何缓存：等待拉取（并发请求自动合并，只打一次上游）
+    const data = await dedupe(CACHE_KEY, fetchUpstream);
+    return { code: 200, message: "success", source: "api", data };
   } catch (error) {
+    // 5. 上游故障兜底：返回保留期内的旧数据，避免整页报错
+    const fallback =
+      getStale<MonitorsDataResult>(CACHE_KEY) ??
+      (await kvGet<MonitorsDataResult>(CACHE_KEY))?.value;
+    if (fallback) {
+      return { code: 200, message: "success", source: "stale", data: fallback };
+    }
     setResponseStatus(event, 500);
     return {
       code: 500,
